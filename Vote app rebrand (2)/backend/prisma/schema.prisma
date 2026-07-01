@@ -1,0 +1,148 @@
+// Prisma schema — Vote platform data model.
+// Postgres. Run: npx prisma migrate dev
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  handle       String   @unique          // e.g. "utku"
+  name         String
+  email        String   @unique
+  passwordHash String                     // bcrypt — never returned to clients
+  avatarColor  String?                    // gradient token for the avatar bubble
+  verified     Boolean  @default(false)
+  influencer   Boolean  @default(false)
+
+  // optional demographics — power the results breakdown (age / gender)
+  gender    String?                       // "Women" | "Men" | "Other" | null
+  birthYear Int?
+
+  // gamification
+  xp       Int @default(0)
+  level    Int @default(1)
+  streak   Int @default(0)
+  coins    Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  decisions     Decision[]
+  votes         Vote[]
+  comments      Comment[]
+  following     Follow[]        @relation("follower")
+  followers     Follow[]        @relation("following")
+  notifications Notification[]  @relation("recipient")
+  refreshTokens RefreshToken[]
+
+  @@index([email])
+}
+
+// Directed follow edge. A "mutual" (close friend) exists when A→B AND B→A.
+model Follow {
+  id          String   @id @default(cuid())
+  follower    User     @relation("follower", fields: [followerId], references: [id], onDelete: Cascade)
+  followerId  String
+  following   User     @relation("following", fields: [followingId], references: [id], onDelete: Cascade)
+  followingId String
+  createdAt   DateTime @default(now())
+
+  @@unique([followerId, followingId])     // no duplicate edges
+  @@index([followingId])
+}
+
+enum Audience {
+  EVERYONE
+  CLOSE_FRIENDS   // only mutual-followers may see + vote
+}
+
+model Decision {
+  id        String   @id @default(cuid())
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  authorId  String
+  question  String   @db.VarChar(200)
+  hint      String?  @db.VarChar(120)
+  category  String
+  audience  Audience @default(EVERYONE)
+  closesAt  DateTime                       // voting window end
+  createdAt DateTime @default(now())
+
+  options  Option[]                         // exactly 2, enforced in service layer
+  votes    Vote[]
+  comments Comment[]
+
+  @@index([authorId])
+  @@index([audience, createdAt])
+}
+
+// Each option MUST have an image (enforced in create service + DB not-null).
+model Option {
+  id         String @id @default(cuid())
+  decision   Decision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+  decisionId String
+  tag        String   // "A" | "B"
+  label      String?
+  imageUrl   String   // required — no image, no option
+  votes      Vote[]
+
+  @@unique([decisionId, tag])
+}
+
+// One vote per user per decision (enforced by unique constraint).
+model Vote {
+  id         String   @id @default(cuid())
+  decision   Decision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+  decisionId String
+  option     Option   @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  optionId   String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId     String
+  createdAt  DateTime @default(now())
+
+  @@unique([decisionId, userId])           // can't vote twice
+  @@index([optionId])
+}
+
+// Only users who have voted on the decision may comment (enforced in service).
+model Comment {
+  id         String   @id @default(cuid())
+  decision   Decision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+  decisionId String
+  author     User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  authorId   String
+  body       String   @db.VarChar(500)
+  pick       String   // the tag the author voted for — shown next to the comment
+  createdAt  DateTime @default(now())
+
+  @@index([decisionId, createdAt])
+}
+
+model Notification {
+  id          String   @id @default(cuid())
+  recipient   User     @relation("recipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  recipientId String
+  type        String   // vote | follow | comment | result | streak | badge
+  body        String
+  read        Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@index([recipientId, read])
+}
+
+// Rotated refresh tokens (stored hashed). Enables logout + revocation.
+model RefreshToken {
+  id        String   @id @default(cuid())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  tokenHash String   @unique                // sha256 of the refresh token
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
